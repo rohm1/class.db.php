@@ -9,7 +9,12 @@ class db {
 	/**
 	 * @var int
 	 */
-	 public static $nb = 0;
+	public static $nb = 0;
+
+	/**
+	 * @var mysqli
+	 */
+	public static $co = null;
 
 	/**
 	 * contructor: connects to database if not connected
@@ -17,8 +22,16 @@ class db {
 	 * @return void
 	 */
 	public function __construct($host, $name_db, $pwd_db, $tb_db) {
-		$db = mysql_connect($host, $name_db, $pwd_db) or die ("erreur de connexion");
-		mysql_select_db($tb_db, $db) or die ("erreur de connexion base");
+		$co = new mysqli($host, $name_db, $pwd_db);
+		if($co->connect_error) {
+			die("could not connect to the database");
+		}
+
+		if(!$co->select_db($tb_db)) {
+			die("error while selecting table '" . $tb_db . "'");
+		}
+
+		self::$co = $co;
 	}
 
 	/**
@@ -28,14 +41,13 @@ class db {
 	 * @return mysql_result
 	 */
 	public static function query($sql) {
-		$result = mysql_query($sql) or die('sql error: ' . mysql_error() . '<br /> query: ' . $sql);
+        if (!($result = self::$co->query($sql))) {
+            throw new mysqli_sql_exception('<br />' . self::$co->error . '<br />query: ' . $sql);
+        }
 
-		if(strtolower(substr(trim($sql), 0, 6)) != 'select') {
-			if(function_exists('log_sql'))
-				log_sql($sql);
+		if(strtolower(substr(trim($sql), 0, 6)) == 'select') {
+			self::$nb++;
 		}
-		else
-			db::$nb++;
 
 		return $result;
 	}
@@ -47,10 +59,11 @@ class db {
 	 * @return array
 	 */
 	public static function fetchArray($sql) {
-		$result = db::query($sql);
+		$result = self::query($sql);
 		$arr = array();
-		while($row = mysql_fetch_assoc($result))
+		while($row = $result->fetch_assoc()) {
 			$arr[] = $row;
+		}
 
 		return $arr;
 	}
@@ -63,17 +76,20 @@ class db {
 	 */
 	public static function escape($data) {
 		if(is_array($data)) {
-			foreach ($data AS $key=>$str)
-				$data[$key] = mysql_real_escape_string($str);
+			foreach ($data AS $key=>$str) {
+				$data[$key] = self::$co->real_escape_string($str);
+			}
+
 			return $data;
 		}
-		else
-			return mysql_real_escape_string($data);
+		else {
+			return self::$co->real_escape_string($data);
+		}
 	}
 
 	/**
 	 * inserts a data array into a table
-	 * example: $db->insert("user", array("name"=>"Sascha", "lastlogin"=>"NOW()", "type"=>'NULL'))
+	 * example: db::insert("user", array("name"=>"Sascha", "lastlogin"=>"NOW()", "type"=>'NULL'))
 	 * returns inserted primary key
 	 *
 	 * @param $table - mysql table
@@ -82,19 +98,23 @@ class db {
 	 * @return int
 	 */
 	public static function insert($table, $data=array(), $escape=true) {
-		if($escape)
-			$data = db::escape($data);
-		foreach($data AS $key=>$value) {
-			if(!in_array($value, db::$except_quotes) || is_numeric($value))
-				$data[$key] = "'".$value."'";
+		if($escape) {
+			$data = self::escape($data);
 		}
-		db::query("INSERT INTO ".$table."(".implode(",",array_keys($data)).") VALUES (".implode(",",array_values($data)).")");
-		return mysql_insert_id();
+
+		foreach($data AS $key=>$value) {
+			if(!in_array($value, self::$except_quotes) || is_numeric($value)) {
+				$data[$key] = "'".$value."'";
+            }
+		}
+
+		self::query("INSERT INTO ".$table."(".implode(",",array_keys($data)).") VALUES (".implode(",",array_values($data)).")");
+		return self::$co->insert_id;
 	}
 
 	/**
 	 * updates one or more rows
-	 * example: $db->update("user", array("name"=>"Sascha", "lastlogin"=>"NOW()"), "userid='1'")
+	 * example: db::update("user", array("name"=>"Sascha", "lastlogin"=>"NOW()"), "userid='1'")
 	 * returns number of affected rows
 	 *
 	 * @param $table
@@ -105,38 +125,42 @@ class db {
 	 * @return int
 	 */
 	public static function update($table, $data=array(), $where, $limit=1,$escape=true) {
-		if($escape)
-			$data = db::escape($data);
+		if($escape) {
+			$data = self::escape($data);
+		}
 
 		$newdata = array();
 		foreach($data AS $key=>$value) {
-			if (!in_array($value, db::$except_quotes))
+			if (!in_array($value, self::$except_quotes)) {
 				$newdata[$key] = $key."='".$value."'";
-			else
+			} else {
 				$newdata[$key] = $key."=".$value;
+			}
 		}
 
 		if(is_array($where) && $where) {
 			$whereSql = "1";
-			foreach($where as $k=>$v)
-				$whereSql .= " AND ".$k."='".db::escape($v)."' ";
-		}
-		else
+			foreach($where as $k=>$v) {
+				$whereSql .= " AND ".$k."='".self::escape($v)."' ";
+			}
+		} else {
 			$whereSql = $where;
+        }
 
-		if($limit>0)
+		if($limit>0) {
 			$limit_sql = " LIMIT ".$limit;
-		else
+		} else {
 			$limit_sql = "";
+		}
 
-		db::query("UPDATE ".$table." SET ".implode(",",$newdata)." WHERE ".$whereSql.$limit_sql);
-		return mysql_affected_rows();
+		self::query("UPDATE ".$table." SET ".implode(",",$newdata)." WHERE ".$whereSql.$limit_sql);
+		return mysqli_affected_rows(self::$co);
 	}
 
 	/**
 	 * delete one or more rows
-	 * example: $db->delete("user", "userid='1'",1)
-	 * or: $db->delete("user", array("userid"=>1), 1)
+	 * example: db::delete("user", "userid='1'",1)
+	 * or: db::delete("user", array("userid"=>1), 1)
 	 * returns number of affected rows
 	 *
 	 * @param $table
@@ -145,21 +169,23 @@ class db {
 	 * @return int
 	 */
 	public static function delete($table, $where, $limit=-1) {
-		if($limit>0)
+		if($limit > 0) {
 			$limit_sql = " LIMIT ".$limit;
-		else
+		} else {
 			$limit_sql = "";
+		}
 
 		$whereSql = "1";
 		if(is_array($where) && $where) {
-			foreach($where AS $k=>$v)
-				$whereSql .= ' AND '.$k."='".db::escape($v)."' ";
-		}
-		else
+			foreach($where as $k => $v) {
+				$whereSql .= ' AND '.$k."='".self::escape($v)."' ";
+			}
+		} else {
 			$whereSql = $where;
+		}
 
-		db::query("DELETE FROM ".$table." WHERE ".$whereSql.$limit_sql);
-		return mysql_affected_rows();
+		self::query("DELETE FROM " . $table . " WHERE " . $whereSql . $limit_sql);
+		return mysqli_affected_rows(self::$co);
 	}
 
 	/**
@@ -171,14 +197,15 @@ class db {
 	 * @return array
 	 */
 	public static function getPage($sql, $nbr=-1, $page=-1) {
-		if($page != -1 && $nbr != -1)
-			$limit = " LIMIT ".(($page-1)*$nbr).",".$nbr;
-		elseif($nbr != -1)
-			$limit = " LIMIT ".$nbr;
-		else
+		if($page != -1 && $nbr != -1) {
+			$limit = " LIMIT " . (($page-1)*$nbr) . "," . $nbr;
+		} elseif($nbr != -1) {
+			$limit = " LIMIT " . $nbr;
+		} else {
 			$limit = "";
+		}
 
-		return db::fetchArray($sql.$limit);
+		return self::fetchArray($sql . $limit);
 	}
 
 }
